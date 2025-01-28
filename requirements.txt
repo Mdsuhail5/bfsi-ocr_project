@@ -1,0 +1,22 @@
+pandas               # For data handling
+numpy                # For numerical operations
+opencv-python        # For image preprocessingPillow
+pytesseract          # For OCR processing
+matplotlib           # For visualization
+seaborn              # For advanced data visualization
+bing-image-downloader
+tqdm
+requests
+flask
+flask-limiter
+transformers 
+torch
+streamlit         # Streamlit for the web app
+pdf2image          # Convert PDF pages to images
+Pillow              # Image processing library
+regex         # Regular expression handling
+
+
+
+
+
