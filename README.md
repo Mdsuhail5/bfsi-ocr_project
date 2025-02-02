@@ -114,8 +114,6 @@ finsight/
     └── unsupervised.py  # BERT-based categorization
 ```
 
-## 🤝 Contributing
-Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## 📝 License
 This project is licensed under the MIT License - see the LICENSE file for details.
@@ -125,6 +123,3 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) for optical character recognition
 - [Hugging Face](https://huggingface.co/) for BERT models and transformers
 - [Plotly](https://plotly.com/) for interactive visualizations
-
-## 📞 Support
-For support, please open an issue in the GitHub repository or contact the maintenance team.
