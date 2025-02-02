@@ -1,126 +1,187 @@
-import cv2
-import pytesseract
 import pandas as pd
-import numpy as np
+import pdfplumber
 import re
 from datetime import datetime
-from pdf2image import convert_from_path
-import os
+import pytesseract
+from PIL import Image
+import cv2
+import numpy as np
 
 
-def standardize_date_format(date_str):
-    possible_formats = [
-        "%d/%m/%Y", "%d-%m-%Y", "%d %m %Y", "%m/%d/%Y",
-        "%Y/%m/%d", "%d %b %Y", "%b %d, %Y", "%Y-%m-%d"
-    ]
-    for fmt in possible_formats:
-        try:
-            return datetime.strptime(date_str, fmt).strftime("%d-%m-%Y")
-        except ValueError:
-            continue
-    return None
+def clean_amount(amount_str):
+    if not amount_str:
+        return 0.0
+    try:
+        return float(amount_str.replace(',', ''))
+    except ValueError:
+        return 0.0
+
+
+def parse_date(date_str):
+    try:
+        return datetime.strptime(date_str, '%m,%d,%Y').strftime('%Y-%m-%d')
+    except:
+        return date_str
+
+
+def extract_transactions_from_pdf(pdf_path):
+    transactions = []
+
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text()
+            if not text:
+                continue
+
+            lines = text.split('\n')
+
+            for line in lines:
+                if any(x in line.lower() for x in ['date from', 'transactions for', 'last n transactions']):
+                    continue
+
+                date_match = re.search(r'(\d{2},\d{2},\d{4})', line)
+                if date_match:
+                    parts = line.split()
+
+                    date = date_match.group(1)
+
+                    desc_start = line.index(date) + len(date)
+                    amounts = re.findall(
+                        r'(?:^|\s)(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)', line[desc_start:])
+                    desc_end = line.rindex(
+                        amounts[-1]) if amounts else len(line)
+                    description = line[desc_start:desc_end].strip()
+
+                    if len(amounts) >= 2:
+                        balance = amounts[-1]
+                        amount = amounts[-2]
+                        prev_balance = float(balance.replace(',', ''))
+                        curr_amount = float(amount.replace(',', ''))
+
+                        if prev_balance < curr_amount:
+                            debit, credit = amount, '0.00'
+                        else:
+                            debit, credit = '0.00', amount
+
+                        transaction = {
+                            'Date': parse_date(date),
+                            'Description': description,
+                            'Debit': debit,
+                            'Credit': credit,
+                            'Balance': balance
+                        }
+                        transactions.append(transaction)
+
+    df = pd.DataFrame(transactions, columns=[
+                      'Date', 'Description', 'Debit', 'Credit', 'Balance'])
+
+    for col in ['Debit', 'Credit', 'Balance']:
+        if col in df.columns:
+            df[col] = df[col].apply(clean_amount)
+
+    return df
 
 
 def preprocess_image(image):
+    """Enhanced image preprocessing for better OCR results"""
     if len(image.shape) == 3:
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
-    binary_image = cv2.adaptiveThreshold(
-        image, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
-    denoised = cv2.fastNlMeansDenoising(binary_image)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(denoised)
-
-    return enhanced
-
-
-def extract_text_from_file(file_path):
-    if file_path.lower().endswith('.pdf'):
-        pages = convert_from_path(file_path, dpi=300)
-        text = []
-        for page in pages:
-            open_cv_image = cv2.cvtColor(np.array(page), cv2.COLOR_RGB2BGR)
-            processed_image = preprocess_image(open_cv_image)
-            text.append(pytesseract.image_to_string(processed_image))
-        return '\n'.join(text)
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     else:
-        image = cv2.imread(file_path)
-        if image is None:
-            raise ValueError(f"Could not read image file: {file_path}")
-        processed_image = preprocess_image(image)
-        return pytesseract.image_to_string(processed_image)
+        gray = image
+
+    # Enhanced contrast
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    contrast = clahe.apply(gray)
+
+    # Denoise
+    denoised = cv2.fastNlMeansDenoising(contrast)
+
+    # Adaptive thresholding
+    binary = cv2.threshold(
+        denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+
+    # Morphological operations
+    kernel = np.ones((1, 1), np.uint8)
+    opening = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+
+    return opening
 
 
-def extract_bank_statement_data(text):
+def extract_transactions_from_text(text):
+    """Enhanced transaction extraction from text"""
+    lines = text.split('\n')
     transactions = []
-    lines = text.splitlines()
-
-    date_pattern = r"\b(\d{1,2}[-/\s]\d{1,2}[-/\s]\d{2,4})\b"
-    amount_pattern = r"(\d+,?\d*\.?\d*)"
-
-    current_transaction = {}
 
     for line in lines:
-        date_match = re.search(date_pattern, line)
-        if date_match:
-            if current_transaction:
-                transactions.append(current_transaction)
-            current_transaction = {
-                "date": standardize_date_format(date_match.group(1))}
+        # Match various date formats
+        if re.search(r'\d{2}[-/][A-Za-z]{3}|\d{2}[-/]\d{2}[-/]\d{4}', line):
+            parts = re.split(r'\s{2,}', line.strip())
 
-            desc_start = date_match.end()
-            amounts = re.finditer(amount_pattern, line[desc_start:])
-            amounts = list(amounts)
-            if amounts:
-                desc_end = desc_start + amounts[0].start()
-                description = line[desc_start:desc_end].strip()
-                current_transaction["description"] = re.sub(
-                    r"[^a-zA-Z0-9\s]", "", description)
+            if len(parts) >= 3:
+                # Extract all numbers from the line
+                numbers = [n for n in parts if re.match(
+                    r'^[-]?\d+\.?\d*$', n.replace(',', ''))]
 
-                if len(amounts) >= 2:
-                    amount1 = float(amounts[0].group(1).replace(',', ''))
-                    amount2 = float(amounts[1].group(1).replace(',', ''))
+                if len(numbers) >= 2:
+                    date = parts[0]
+                    desc_parts = parts[1:-len(numbers)]
+                    description = ' '.join(
+                        desc_parts) if desc_parts else 'Unknown'
 
-                    if "DR" in line or "debit" in line.lower():
-                        current_transaction["debit"] = amount1
-                        current_transaction["credit"] = 0
-                    elif "CR" in line or "credit" in line.lower():
-                        current_transaction["debit"] = 0
-                        current_transaction["credit"] = amount1
+                    # Handle different transaction formats
+                    if len(numbers) >= 3:
+                        debit = clean_amount(numbers[-3])
+                        credit = clean_amount(numbers[-2])
                     else:
-                        current_transaction["debit"] = amount1 if amount1 > 0 else 0
-                        current_transaction["credit"] = amount2 if amount2 > 0 else 0
+                        amount = clean_amount(numbers[-2])
+                        debit = amount if amount > 0 else 0
+                        credit = -amount if amount < 0 else 0
 
-                    if len(amounts) >= 3:
-                        current_transaction["balance"] = float(
-                            amounts[2].group(1).replace(',', ''))
+                    balance = clean_amount(numbers[-1])
 
-    if current_transaction:
-        transactions.append(current_transaction)
+                    transaction = {
+                        'Date': date,
+                        'Description': description,
+                        'Debit': debit,
+                        'Credit': credit,
+                        'Balance': balance
+                    }
+                    transactions.append(transaction)
 
-    return transactions
+    return pd.DataFrame(transactions)
 
 
-def process_bank_statement(file_path):
-    raw_text = extract_text_from_file(file_path)
-    transactions = extract_bank_statement_data(raw_text)
-    df = pd.DataFrame(transactions)
+def extract_transactions_from_image(image_path):
+    """Extract transactions from bank statement image with enhanced processing"""
+    # Read and validate image
+    image = cv2.imread(image_path)
+    if image is None:
+        raise ValueError(f"Could not read image at {image_path}")
 
-    df['date'] = pd.to_datetime(df['date'], format='%d-%m-%Y', errors='coerce')
-    df = df.dropna(subset=['date'])
-    df = df.sort_values('date')
+    # Scale up image for better OCR
+    scale_factor = 2
+    image = cv2.resize(image, None, fx=scale_factor, fy=scale_factor)
 
-    df['date'] = df['date'].apply(lambda x: x.strftime(
-        '%Y-%m-%d %H:%M:%S') if pd.notnull(x) else x)
+    # Preprocess image
+    processed = preprocess_image(image)
 
-    required_columns = ['date', 'description', 'debit', 'credit', 'balance']
-    for col in required_columns:
-        if col not in df.columns:
-            df[col] = 0 if col in ['debit', 'credit', 'balance'] else ''
+    # Configure and perform OCR
+    custom_config = r'--oem 3 --psm 6 -c preserve_interword_spaces=1'
+    text = pytesseract.image_to_string(processed, config=custom_config)
 
-    visualization_df = pd.DataFrame({
-        'category': df['description'],
-        'amount': df['debit'] + df['credit']
-    })
+    # Extract and process transactions
+    df = extract_transactions_from_text(text)
 
-    return df, visualization_df
+    # Clean up the data
+    for col in ['Debit', 'Credit', 'Balance']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+
+    # Sort by date if possible
+    try:
+        df['Date'] = pd.to_datetime(df['Date'], format='%d-%b-%Y')
+        df = df.sort_values('Date')
+    except:
+        pass  # Keep original order if date parsing fails
+
+    return df
